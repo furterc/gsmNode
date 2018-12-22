@@ -1,0 +1,9 @@
+BUILD/
+GettingStarted.html
+.settings
+eclipse-extras
+caboodle.git
+mbed_settings.p*
+mbed_config.h
+.cproject
+.project
