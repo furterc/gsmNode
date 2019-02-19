@@ -5,7 +5,7 @@
  *      Author: cfurter
  */
 
-#include "SIM900.h"
+#include <SIM800L.h>
 #include "caboodle/utils.h"
 
 #define MAX_SOCK_NUM 3
@@ -16,38 +16,33 @@
 #define SIM_DEBUG_LVL1
 
 #ifdef SIM_DEBUG_LVL0
-#define TRACE(_x, ...) INFO_TRACE("SIM900", _x, ##__VA_ARGS__)
+#define TRACE(_x, ...) INFO_TRACE("SIM800L", _x, ##__VA_ARGS__)
 #else
 #define TRACE(_x, ...)
 #endif
 
-SIM900::SIM900(FileHandle *fh, DigitalInOut *reset, const char *apn, const char *username, const char *password) \
+SIM800L::SIM800L(FileHandle *fh, DigitalOut *power, const char *apn, const char *username, const char *password) \
                                                                                         : mCMDParser(fh, "\r\n"), \
-                                                                                        mReset(reset), \
-                                                                                        mState(SIM900_UNKNOWN), \
+                                                                                        mPWR(power), \
+                                                                                        mState(MODEM_UNKNOWN), \
                                                                                         mApn(apn), \
                                                                                         mUsername(username), \
                                                                                         mPassword(password), \
-                                                                                        mCmdFailCount(SIM900_CMD_FAIL_COUNT)
+                                                                                        mCmdFailCount(SIM800L_CMD_FAIL_COUNT)
 {
-    TRACE("Constructor\n");
     connectedCallback = 0;
-    textMessageCallback = 0;
+    disconnectCallback = 0;
 
-    mReset->output();
-    mReset->write(1);
-//    mReset->mode(OpenDrainPullUp);
+    mPWR->write(1);
 
     mTimer.start();
     mElapsed = mTimer.read_ms();
 
     printf("sim mutex: %p\n", &simMutex);
-    mCMDParser.set_timeout(1000);
+    mCMDParser.set_timeout(2000);
 
     manualCmdBusy = 0;
-    mCMDParser.oob("+CUSD", callback(SIM900::handleUssd, this));
-    mCMDParser.oob("+CMTI", callback(SIM900::handleNewTextMessage, this));
-    mCMDParser.oob("+CMGR", callback(SIM900::parseTextMessage, this));
+    mCMDParser.oob("+CUSD", callback(SIM800L::handleUssd, this));
     mBufferFlag = 0;
     mCMDParser.debug_on(0);
 
@@ -56,100 +51,12 @@ SIM900::SIM900(FileHandle *fh, DigitalInOut *reset, const char *apn, const char 
 #endif
 }
 
-SIM900::~SIM900()
+SIM800L::~SIM800L()
 {
 
 }
 
-
-void SIM900::parseTextMessage(SIM900 *_this)
-{
-    int i = 0;
-    char line1Buffer[128];
-    char line2Buffer[160];
-    char *bufferPointer = line1Buffer;
-
-    int c = _this->mCMDParser.getc();
-
-    int newLineCount = 2;
-
-    while(c != -1 && i < 288)
-    {
-        // escape the new lines and quotations
-        if(c == '\n' || c == '\"')
-        {
-            c = _this->mCMDParser.getc();
-            continue;
-        }
-
-        i++;
-        if(c == '\r')
-        {
-            newLineCount--;
-            *bufferPointer = 0;
-
-            if(!newLineCount)
-                break;
-
-            bufferPointer = line2Buffer;
-            c = _this->mCMDParser.getc();
-            continue;
-        }
-
-        *bufferPointer = c;
-        bufferPointer++;
-        c = _this->mCMDParser.getc();
-    }
-
-    char *argv[5];
-    int argc = 5;
-    util_parse_params(line1Buffer, argv, &argc, ',');
-
-    if(_this->textMessageCallback)
-        _this->textMessageCallback(argv[1], line2Buffer);
-}
-
-void SIM900::handleNewTextMessage(SIM900 *_this)
-{
-    int i = 0;
-    char buffer[256];
-    int c = _this->mCMDParser.getc();
-
-    while(c != -1 && i < 255)
-    {
-        if(c == '\r')
-            break;
-        buffer[i++] = c;
-        c = _this->mCMDParser.getc();
-    }
-
-    char *argv[4];
-    int argc = 4;
-    util_parse_params(buffer, argv, &argc, ',');
-
-    wait(1);
-
-    // read the new message
-    int msgIndex = atoi(argv[1]);
-    _this->mCMDParser.send("AT+CMGR=%d", msgIndex);
-    if(!_this->mCMDParser.recv("OK"))
-    {
-        printf("AT+CMGR=%d: ", msgIndex);
-        printf(RED("FAIL\n"));
-    }
-
-    wait(1);
-
-    // delete all the messages
-    _this->mCMDParser.send("AT+CMGD=%d, 4", msgIndex);
-    if(!_this->mCMDParser.recv("OK"))
-    {
-        printf("AT+CMGD=%d, 4: ", msgIndex);
-        printf(RED("FAIL\n"));
-    }
-}
-
-void SIM900::handleUssd(SIM900 *_this)
+void SIM800L::handleUssd(SIM800L *_this)
 {
     printf(YELLOW("OOBs\n"));
 
@@ -167,7 +74,7 @@ void SIM900::handleUssd(SIM900 *_this)
     _this->mBufferFlag = 1;
 }
 
-void SIM900::sendUSSD(const char* ussd)
+void SIM800L::sendUSSD(const char* ussd)
 {
     simMutex.lock();
 
@@ -193,42 +100,44 @@ void SIM900::sendUSSD(const char* ussd)
     simMutex.unlock();
 }
 
-void SIM900::resetDevice()
+void SIM800L::resetDevice()
 {
-    mReset->write(0);
-    wait(1);
-    mReset->write(1);
+    TRACE("POWER OFF\n");
+    mPWR->write(0);
+    wait(10);
+    TRACE("POWER ON\n");
+    mPWR->write(1);
 }
 
-void SIM900::setConnectCallback(void (*callback)(uint8_t id))
+void SIM800L::setConnectCallback(void (*callback)(uint8_t id))
 {
     if(callback)
         connectedCallback = callback;
 }
 
-void SIM900::setTextMessageCallback(void (*callback)(char *from, char *message))
+void SIM800L::setDisconnectCallback(void (*callback)(uint8_t id))
 {
     if(callback)
-        textMessageCallback = callback;
+        disconnectCallback = callback;
 }
 
-int SIM900::connect(int ptl, const char *host, int port)
+int SIM800L::connect(int protocol, const char *host, int port)
 {
-    if(mState < SIM900_CONNECTED)
+    if(mState < MODEM_CONNECTED)
         return -1;
 
     TRACE("Connect to host %s:%d\n", host, port);
 
-    const char *protocol;
-    if(ptl == TCP) {
-        protocol = "TCP";
-    } else if(ptl == UDP) {
-        protocol = "UDP";
+    const char *ptcl;
+    if(protocol == TCP) {
+        ptcl = "TCP";
+    } else if(protocol == UDP) {
+        ptcl = "UDP";
     } else {
         return -1;
     }
 
-    mCMDParser.send("AT+CIPSTART=\"%s\",\"%s\",%d", protocol, host, port);
+    mCMDParser.send("AT+CIPSTART=\"%s\",\"%s\",%d", ptcl, host, port);
 
     char response[32];
     if(mCMDParser.recv("CONNECT %s\n", response))
@@ -240,7 +149,7 @@ int SIM900::connect(int ptl, const char *host, int port)
     return -1;
 }
 
-int SIM900::disconnect()
+int SIM800L::disconnect()
 {
     TRACE("Disconnect\n");
     mCMDParser.send("AT+CIPCLOSE");
@@ -254,9 +163,9 @@ int SIM900::disconnect()
     return -1;
 }
 
-int SIM900::isConnected()
+int SIM800L::isConnected()
 {
-    if(mState < SIM900_CONNECTED)
+    if(mState < MODEM_CONNECTED)
         return -1;
 
     return 0;
@@ -271,9 +180,9 @@ int SIM900::isConnected()
 //    return false;
 }
 
-int SIM900::send(unsigned char *data, int len)
+int SIM800L::send(unsigned char *data, int len)
 {
-    if(mState != SIM900_CONNECTED)
+    if(mState != MODEM_CONNECTED)
         return -1;
 
     simMutex.lock();
@@ -305,13 +214,14 @@ int SIM900::send(unsigned char *data, int len)
         }
     }
 
+    mState = MODEM_DISCONNECT;
     simMutex.unlock();
     return -1;
 }
 
-int SIM900::receive(unsigned char *data, int len)
+int SIM800L::receive(unsigned char *data, int len)
 {
-    if(mState != SIM900_CONNECTED)
+    if(mState != MODEM_CONNECTED)
         return -1;
 
     simMutex.lock();
@@ -336,39 +246,12 @@ int SIM900::receive(unsigned char *data, int len)
         return count;
     }
 
-
+    mState = MODEM_DISCONNECT;
     simMutex.unlock();
     return -1;
 }
 
-int SIM900::sendTextMessage(const char *number, const char *message)
-{
-    simMutex.lock();
-    printf("Sending text Message\n");
-
-    mCMDParser.send("AT+CMGS=\"%s\"", number);
-    if(mCMDParser.recv(">"))
-    {
-        //write the data and the CTRL+Z escape character
-        mCMDParser.write(message, strlen(message));
-        char esc = 26;
-        mCMDParser.write(&esc, 1);
-
-        int response = 0;
-        wait(5);
-        if(mCMDParser.recv("+CMGS: %d\n", &response))
-        {
-            printf("SMS Send response: %d\n", response);
-            simMutex.unlock();
-            return 1;
-        }
-    }
-
-    simMutex.unlock();
-    return -1;
-}
-
-int SIM900::atSend(const char* command)
+int SIM800L::atSend(const char* command)
 {
     simMutex.lock();
     manualCmdBusy = 1;
@@ -388,18 +271,22 @@ int SIM900::atSend(const char* command)
         simMutex.unlock();
         return 1;
     }
+
+    #ifndef SIM_DEBUG_LVL1
     mCMDParser.debug_on(0);
+#endif
+
     manualCmdBusy = 0;
     simMutex.unlock();
     return 0;
 }
 
-void SIM900::retryReset()
+void SIM800L::retryReset()
 {
-    mCmdFailCount = SIM900_CMD_FAIL_COUNT;
+    mCmdFailCount = SIM800L_CMD_FAIL_COUNT;
 }
 
-int SIM900::retryCommand()
+int SIM800L::retryCommand()
 {
     mCmdFailCount--;
     if(mCmdFailCount <= 0)
@@ -410,7 +297,7 @@ int SIM900::retryCommand()
     return 0;
 }
 
-void SIM900::run()
+void SIM800L::run()
 {
     if(manualCmdBusy)
         return;
@@ -425,31 +312,30 @@ void SIM900::run()
     simMutex.lock();
     switch(mState)
     {
-        case SIM900_UNKNOWN:
+        case MODEM_UNKNOWN:
         {
-            TRACE("unknown\n");
             retryReset();
-            mState = SIM900_RESET_DEVICE;
+            mState = MODEM_RESET_DEVICE;
         }
         break;
 
-        case SIM900_RESET_DEVICE:
+        case MODEM_RESET_DEVICE:
         {
-            TRACE("reset device\n");
+            TRACE("RESET DEVICE\n");
             resetDevice();
 
             retryReset();
-            mState = SIM900_POLL;
+            mState = MODEM_POLL;
         }
         break;
 
-        case SIM900_POLL:
+        case MODEM_POLL:
         {
             mCMDParser.send("AT");
             if(!mCMDParser.recv("OK"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_RESET_DEVICE;
+                    mState = MODEM_RESET_DEVICE;
 
                 break;
             }
@@ -460,83 +346,52 @@ void SIM900::run()
             if(!mCMDParser.recv("OK"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_RESET_DEVICE;
+                    mState = MODEM_RESET_DEVICE;
 
                 break;
             }
 
-            wait(0.5);
-
-            // Set SMS Message Format as text
-//            mCMDParser.send("AT+CMGF=1");
-//            if(!mCMDParser.recv("OK"))
-//            {
-//                mCmdFailCount--;
-//                if(mCmdFailCount <= 0)
-//                {
-//                    mCmdFailCount = SIM900_CMD_FAIL_COUNT;
-//                    mState = SIM900_RESET_DEVICE;
-//                }
-//                break;
-//            }
-
-            TRACE(GREEN("Found\n"));
+            TRACE(GREEN("found\n"));
             retryReset();
-            mState = SIM900_CHECK_SIM;
+            mState = MODEM_CHECK_SIM;
         }
         break;
 
-        case SIM900_CHECK_SIM:
+        case MODEM_CHECK_SIM:
         {
-            TRACE("state = SIM900_CHECK_SIM\n");
-
             mCMDParser.send("AT+CPIN?");
             char simState[16];
             if(!mCMDParser.recv("+CPIN: %s\n", simState))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_RESET_DEVICE;
+                {
+                    TRACE(RED("+CPIN: %s\n"), simState);
+                    mState = MODEM_RESET_DEVICE;
+                }
 
                 break;
             }
 
             if(!strcmp(simState, "READY"))
             {
-
-
+                TRACE(GREEN("+CPIN: READY\n"));
                 mCmdFailCount = 10;
-                mState = SIM900_CHECK_REGISTRATION;
+                mState = MODEM_CHECK_REGISTRATION;
             }
         }
         break;
 
-        case SIM900_CHECK_REGISTRATION:
+        case MODEM_CHECK_REGISTRATION:
         {
             //sim card found
-            TRACE(GREEN("Check Registrations\n"));
-
             mCMDParser.send("AT+CREG=0");
             if(!mCMDParser.recv("OK"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_CHECK_SIM;
+                    mState = MODEM_CHECK_SIM;
 
                 break;
             }
-
-            //Check Signal
-//            mCMDParser.send("AT+CSQ");
-//            int rssi, ber;
-//            if(!mCMDParser.recv("+CSQ: %d,%d\n", &rssi, &ber))
-//            {
-//                if(retryCommand() == -1)
-//                    mState = SIM900_GPRS_ATTACHED;
-//
-//                break;
-//            }
-//            TRACE("+CSQ: %d,%d\n", rssi, ber);
-//
-//            wait(0.5);
 
             mCMDParser.send("AT+CREG?");
             int urc = 0;
@@ -544,47 +399,48 @@ void SIM900::run()
             if(!mCMDParser.recv("+CREG: %d, %d\n", &urc, &stat))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_CHECK_SIM;
+                    mState = MODEM_CHECK_SIM;
 
                 break;
             }
 
-            TRACE(GREEN("+CREG: %d, %d\n"), urc, stat);
+            TRACE("+CREG: %d, %d\n", urc, stat);
 
             if(stat == 1)
             {
                 TRACE(GREEN("Registered\n"));
 
                 retryReset();
-                mState = SIM900_GPRS_ATTACHED;
+                mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
 
             if(retryCommand() == -1)
-                mState = SIM900_CHECK_SIM;
+                mState = MODEM_CHECK_SIM;
 
         }
         break;
 
-        case SIM900_GPRS_ATTACHED:
+        case MODEM_GPRS_ATTACHED:
         {
             mCMDParser.send("AT+CGATT?");
             int state = 0;
             if(!mCMDParser.recv("+CGATT: %d\n", &state))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_CHECK_REGISTRATION;
+                    mState = MODEM_CHECK_REGISTRATION;
 
                 break;
             }
 
+            TRACE("+CGATT: %d\n", state);
             if(state == 1)
             {
                 TRACE(GREEN("Attached\n"));
 
                 retryReset();
-                mState = SIM900_CONNECT;
+                mState = MODEM_CONNECT;
 
                 break;
             }
@@ -593,14 +449,14 @@ void SIM900::run()
                 TRACE(RED("Not Attached\n"));
 
                 if(retryCommand() == -1)
-                    mState = SIM900_CHECK_REGISTRATION;
+                    mState = MODEM_CHECK_REGISTRATION;
 
                 break;
             }
         }
         break;
 
-        case SIM900_CONNECT:
+        case MODEM_CONNECT:
         {
             //Check Signal
             mCMDParser.send("AT+CSQ");
@@ -608,58 +464,55 @@ void SIM900::run()
             if(!mCMDParser.recv("+CSQ: %d,%d\n", &rssi, &ber))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
             TRACE("+CSQ: %d,%d\n", rssi, ber);
 
-            wait(0.5);
+            wait(1);
 
             //Select Multiple Connection
             mCMDParser.send("AT+CIPSHUT");
             if(!mCMDParser.recv("SHUT OK\n"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
 
             wait(0.5);
 
-            TRACE("Manual RX Data\n");
             mCMDParser.send("AT+CIPRXGET=1");
             if(!mCMDParser.recv("OK"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
 
             wait(0.5);
 
-            TRACE("Select single Connection\n");
             //Select Multiple Connection
             mCMDParser.send("AT+CIPMUX=0");
             if(!mCMDParser.recv("OK\n"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
 
             wait(0.5);
 
-            TRACE("Set APN\n");
             //set APN
             mCMDParser.send("AT+CIPCSGP=1,\"%s\",\"%s\",\"%s\"", mApn, mUsername, mPassword);
             if(!mCMDParser.recv("OK\n"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
@@ -670,7 +523,7 @@ void SIM900::run()
             if(!mCMDParser.recv("OK\n"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
@@ -682,25 +535,36 @@ void SIM900::run()
             if(!mCMDParser.recv("OK\n"))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_GPRS_ATTACHED;
+                    mState = MODEM_GPRS_ATTACHED;
 
                 break;
             }
 
             retryReset();
-            mState = SIM900_GET_IP;
+            mState = MODEM_GET_IP;
         }
         break;
 
-        case SIM900_GET_IP:
+        case MODEM_GET_IP:
         {
+            mCMDParser.send("AT+CIPCLOSE");
+            char response[16];
+            if(mCMDParser.recv("CLOSE %s\n", response))
+            {
+                if(strcmp(response, "OK"))
+                {
+                    if(retryCommand() == -1)
+                        mState = MODEM_CONNECT;
+                }
+            }
+
             //Get the local IP Address
             mCMDParser.send("AT+CIFSR");
             char ipAddr[32];
             if(!mCMDParser.recv("%s\n", ipAddr))
             {
                 if(retryCommand() == -1)
-                    mState = SIM900_CONNECT;
+                    mState = MODEM_CONNECT;
 
                 break;
             }
@@ -709,41 +573,57 @@ void SIM900::run()
             {
                 TRACE(RED("FAIL to get IP address\n"));
                 if(retryCommand() == -1)
-                    mState = SIM900_CONNECT;
+                    mState = MODEM_CONNECT;
 
                 break;
             }
 
-            TRACE("IP Address: %s\n", ipAddr);
+            TRACE("IP: %s\n", ipAddr);
 
             retryReset();
-            mState = SIM900_CONNECTED;
+            mState = MODEM_CONNECTED;
 
-            TRACE("Connected\n");
+            TRACE(GREEN("Connected\n"));
             if(connectedCallback)
                 connectedCallback(1);
         }
         break;
 
-        case SIM900_CONNECTED:
+        case MODEM_DISCONNECT:
         {
-            mCMDParser.send("AT+CGATT?");
-            int state = 0;
-            if(!mCMDParser.recv("+CGATT: %d\n", &state))
-            {
-                if(retryCommand() == -1)
-                    mState = SIM900_CHECK_SIM;
+            TRACE(RED("Modem Disconnect\n"));
+            if(disconnectCallback)
+                disconnectCallback(1);
+            mState = MODEM_CONNECT;
+        }
+        break;
 
-                break;
-            }
-
-            if(state != 1)
-            {
-                if(retryCommand() == -1)
-                    mState = SIM900_CHECK_SIM;
-
-                break;
-            }
+        case MODEM_CONNECTED:
+        {
+//            mCMDParser.send("AT+CGATT?");
+//            int state = 0;
+//            if(!mCMDParser.recv("+CGATT: %d\n", &state))
+//            {
+//                if(retryCommand() == -1)
+//                {
+//                    TRACE(RED("Modem Timeout\n"));
+//                    mState = MODEM_DISCONNECT;
+//                }
+//
+//                break;
+//            }
+//
+//            if(state != 1)
+//            {
+//                TRACE(RED("+CGATT: %d\n"),state);
+//                if(retryCommand() == -1)
+//                {
+//                    TRACE(RED("Modem Disconnect\n"));
+//                    mState = MODEM_DISCONNECT;
+//                }
+//
+//                break;
+//            }
         }
         break;
     }

@@ -19,7 +19,7 @@ MQTTNetwork::~MQTTNetwork()
 
 int MQTTNetwork::connect(char* hostname, int port)
 {
-    return network->connect(SIM900::TCP, hostname, port);
+    return network->connect(SIM800L::TCP, hostname, port);
 }
 
 int MQTTNetwork::disconnect()

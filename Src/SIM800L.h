@@ -5,30 +5,29 @@
  *      Author: cfurter
  */
 
-#ifndef SRC_SIM900_H_
-#define SRC_SIM900_H_
+#ifndef SRC_SIM800L_H_
+#define SRC_SIM800L_H_
 
 #include "mbed.h"
 #include "rtos.h"
 #include "NetInterface.h"
 
-#define SIM900_CMD_FAIL_COUNT   3
+#define SIM800L_CMD_FAIL_COUNT   3
 
-//#define SIM_DEBUG_LVL1
-
-class SIM900 : public NetInterface
+class SIM800L : public NetInterface
 {
 public:
     enum eModemStates_t{
-        SIM900_UNKNOWN,
-        SIM900_RESET_DEVICE,
-        SIM900_POLL,
-        SIM900_CHECK_SIM,
-        SIM900_CHECK_REGISTRATION,
-        SIM900_GPRS_ATTACHED,
-        SIM900_CONNECT,
-        SIM900_GET_IP,
-        SIM900_CONNECTED
+        MODEM_UNKNOWN,
+        MODEM_RESET_DEVICE,
+        MODEM_POLL,
+        MODEM_CHECK_SIM,
+        MODEM_CHECK_REGISTRATION,
+        MODEM_GPRS_ATTACHED,
+        MODEM_CONNECT,
+        MODEM_GET_IP,
+        MODEM_DISCONNECT,
+        MODEM_CONNECTED
     };
 
     enum Protocol {
@@ -39,7 +38,7 @@ public:
 
 private:
     ATCmdParser mCMDParser;
-    DigitalInOut *mReset;
+    DigitalOut *mPWR;
     eModemStates_t mState;
 
     int mElapsed;
@@ -56,29 +55,24 @@ private:
 
     void resetDevice();
     void (*connectedCallback)(uint8_t id);
-    void (*textMessageCallback)(char *from, char *message);
+    void (*disconnectCallback)(uint8_t id);
 
     rtos::Mutex simMutex;
 
 public:
-    SIM900(FileHandle *fh, DigitalInOut *reset, const char *apn, const char *username, const char *password);
-    virtual ~SIM900();
+    SIM800L(FileHandle *fh, DigitalOut *power, const char *apn, const char *username, const char *password);
+    virtual ~SIM800L();
 
     void setConnectCallback(void (*callback)(uint8_t id));
-    void setTextMessageCallback(void (*callback)(char *from, char *message));
+    void setDisconnectCallback(void (*callback)(uint8_t id));
 
-    int connect(int ptl, const char *host, int port);
+    int connect(int protocol, const char *host, int port);
     int disconnect();
-
-    int sendTextMessage(const char *number, const char *message);
 
     int atSend(const char* command);
 
     void sendUSSD(const char* ussd);
-
-    static void parseTextMessage(SIM900 *_this);
-    static void handleNewTextMessage(SIM900 *_this);
-    static void handleUssd(SIM900 *_this);
+    static void handleUssd(SIM800L *_this);
 
     int send(unsigned char *data, int len);
     int receive(unsigned char *data, int len);
@@ -90,4 +84,4 @@ public:
     void run();
 };
 
-#endif /* SRC_SIM900_H_ */
+#endif /* SRC_SIM800L_H_ */
