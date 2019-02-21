@@ -46,6 +46,9 @@ SIM800L::SIM800L(FileHandle *fh, DigitalOut *power, const char *apn, const char 
     mBufferFlag = 0;
     mCMDParser.debug_on(0);
 
+    mRxHead = 0;
+    mRxTail = 0;
+
 #ifdef SIM_DEBUG_LVL1
     mCMDParser.debug_on(1);
 #endif
@@ -123,8 +126,11 @@ void SIM800L::setDisconnectCallback(void (*callback)(uint8_t id))
 
 int SIM800L::connect(int protocol, const char *host, int port)
 {
-    if(mState < MODEM_CONNECTED)
+    if(mState < MODEM_READYTOCONNECT)
         return -1;
+
+    if(mState == MODEM_CONNECTED)
+        return 0;
 
     TRACE("Connect to host %s:%d\n", host, port);
 
@@ -143,9 +149,13 @@ int SIM800L::connect(int protocol, const char *host, int port)
     if(mCMDParser.recv("CONNECT %s\n", response))
     {
         if(!strcmp(response, "OK"))
+        {
+            TRACE(GREEN("Connect OK\n"));
+            mState = MODEM_CONNECTED;
             return 0;
+        }
     }
-
+    TRACE(RED("Connect FAIL\n"));
     return -1;
 }
 
@@ -182,9 +192,11 @@ int SIM800L::isConnected()
 
 int SIM800L::send(unsigned char *data, int len)
 {
+    printf("sb4\n");
     if(mState != MODEM_CONNECTED)
         return -1;
 
+    printf("se\n");
     simMutex.lock();
     mCMDParser.send("AT+CIPSEND=%d", len);
     if(mCMDParser.recv(">"))
@@ -221,34 +233,26 @@ int SIM800L::send(unsigned char *data, int len)
 
 int SIM800L::receive(unsigned char *data, int len)
 {
-    if(mState != MODEM_CONNECTED)
+    if(mState < MODEM_READYTOCONNECT)
         return -1;
 
     simMutex.lock();
-    int mode = 2;
-    int count = len;
-    mCMDParser.send("AT+CIPRXGET=%d,%d", mode, count);
 
-    int bytesInBuffer = 0;
-    if(mCMDParser.recv("+CIPRXGET:%d,%d,%d\n", &mode, &count, &bytesInBuffer))
+    uint8_t byteCount = 0;
+    for(int i = 0; i < len; i++)
     {
-        //take out the leading newline
-        mCMDParser.getc();
+        uint8_t byte = 0;
+        int d = getRxByte(&byte);
+        if(d == -1)
+           break;
 
-        for(int i = 0; i < count; i++)
-        {
-            int a = mCMDParser.getc();
-            if(a != -1)
-                data[i]= a;
-        }
+        byteCount ++;
 
-        simMutex.unlock();
-        return count;
+        data[i] = byte;
     }
-
-    mState = MODEM_DISCONNECT;
     simMutex.unlock();
-    return -1;
+    return byteCount;
+    return len;
 }
 
 int SIM800L::atSend(const char* command)
@@ -306,6 +310,8 @@ void SIM800L::run()
     int tick = mTimer.read_ms();
     if((tick - mElapsed) < 500)
         return;
+
+//
 
     mElapsed = tick;
 
@@ -484,7 +490,7 @@ void SIM800L::run()
 
             wait(0.5);
 
-            mCMDParser.send("AT+CIPRXGET=1");
+            mCMDParser.send("AT+CIPRXGET=0");
             if(!mCMDParser.recv("OK"))
             {
                 if(retryCommand() == -1)
@@ -581,7 +587,7 @@ void SIM800L::run()
             TRACE("IP: %s\n", ipAddr);
 
             retryReset();
-            mState = MODEM_CONNECTED;
+            mState = MODEM_READYTOCONNECT;
 
             TRACE(GREEN("Connected\n"));
             if(connectedCallback)
@@ -598,32 +604,25 @@ void SIM800L::run()
         }
         break;
 
+        case MODEM_READYTOCONNECT:
+        {
+
+        }
+        break;
+
         case MODEM_CONNECTED:
         {
-//            mCMDParser.send("AT+CGATT?");
-//            int state = 0;
-//            if(!mCMDParser.recv("+CGATT: %d\n", &state))
-//            {
-//                if(retryCommand() == -1)
-//                {
-//                    TRACE(RED("Modem Timeout\n"));
-//                    mState = MODEM_DISCONNECT;
-//                }
-//
-//                break;
-//            }
-//
-//            if(state != 1)
-//            {
-//                TRACE(RED("+CGATT: %d\n"),state);
-//                if(retryCommand() == -1)
-//                {
-//                    TRACE(RED("Modem Disconnect\n"));
-//                    mState = MODEM_DISCONNECT;
-//                }
-//
-//                break;
-//            }
+
+            int a = -1;
+            do {
+                a = mCMDParser.getc();
+                if(a != -1)
+                {
+                    handleRxByte(a);
+                }
+            }
+            while(a != -1);
+
         }
         break;
     }
@@ -634,3 +633,48 @@ void SIM800L::run()
     //reset the counter
     mElapsed = tick;
 }
+
+uint8_t connectCloseCount = 0;
+static uint8_t connectClose[11] = {0x0D, 0x0A, 0x43, 0x4C, 0x4F, 0x53, 0x45, 0x44,  0x0D, 0x0A, 0x00};
+
+void SIM800L::handleRxByte(uint8_t data)
+{
+    if(!connectCloseCount && (data == connectClose[0]))
+        connectCloseCount++;
+
+    if(connectCloseCount)
+    {
+        if(data != connectClose[connectCloseCount])
+            connectCloseCount = 0;
+
+        connectCloseCount++;
+        if(connectCloseCount == 10)
+        {
+            printf(RED("Connection kakked\n"));
+            mRxHead = mRxTail = 0;
+            mState = MODEM_DISCONNECT;
+        }
+    }
+
+    //escape new lines
+    if(data == 0x0A)
+        return;
+
+    mRxBuffer[mRxTail++] = data;
+    mRxTail %= SIM800L_RXBUFFER_SIZE;
+
+    if(mRxHead == mRxTail)
+    {
+        printf("mRxHead == mRxTail\n");
+    }
+}
+
+int SIM800L::getRxByte(uint8_t *data)
+{
+    if(mRxHead == mRxTail)
+        return -1;
+
+    *data = mRxBuffer[mRxHead++];
+    return 0;
+}
+

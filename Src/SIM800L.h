@@ -12,7 +12,8 @@
 #include "rtos.h"
 #include "NetInterface.h"
 
-#define SIM800L_CMD_FAIL_COUNT   3
+#define SIM800L_CMD_FAIL_COUNT  3
+#define SIM800L_RXBUFFER_SIZE   1024
 
 class SIM800L : public NetInterface
 {
@@ -27,6 +28,7 @@ public:
         MODEM_CONNECT,
         MODEM_GET_IP,
         MODEM_DISCONNECT,
+        MODEM_READYTOCONNECT,
         MODEM_CONNECTED
     };
 
@@ -58,6 +60,12 @@ private:
     void (*disconnectCallback)(uint8_t id);
 
     rtos::Mutex simMutex;
+
+    uint8_t mRxBuffer[SIM800L_RXBUFFER_SIZE];
+    uint8_t mRxHead;
+    uint8_t mRxTail;
+    void handleRxByte(uint8_t data);
+    int getRxByte(uint8_t *data);
 
 public:
     SIM800L(FileHandle *fh, DigitalOut *power, const char *apn, const char *username, const char *password);
