@@ -80,7 +80,10 @@ public:
     int atSend(const char* command);
 
     void sendUSSD(const char* ussd);
+
     static void handleUssd(SIM800L *_this);
+    static void handleIncomingByte(SIM800L *_this);
+    static void connectionClosed(SIM800L *_this);
 
     int send(unsigned char *data, int len);
     int receive(unsigned char *data, int len);

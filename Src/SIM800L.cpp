@@ -13,7 +13,7 @@
 
 /* Enable or disable the debug */
 #define SIM_DEBUG_LVL0
-#define SIM_DEBUG_LVL1
+//#define SIM_DEBUG_LVL1
 
 #ifdef SIM_DEBUG_LVL0
 #define TRACE(_x, ...) INFO_TRACE("SIM800L", _x, ##__VA_ARGS__)
@@ -39,10 +39,13 @@ SIM800L::SIM800L(FileHandle *fh, DigitalOut *power, const char *apn, const char 
     mElapsed = mTimer.read_ms();
 
     printf("sim mutex: %p\n", &simMutex);
-    mCMDParser.set_timeout(2000);
+    mCMDParser.set_timeout(500);
 
     manualCmdBusy = 0;
     mCMDParser.oob("+CUSD", callback(SIM800L::handleUssd, this));
+    mCMDParser.oob("+IPD" , callback(SIM800L::handleIncomingByte, this));
+    mCMDParser.oob("CLOSED", callback(SIM800L::connectionClosed, this));
+    mCMDParser.oob("+PDP: DEACT", callback(SIM800L::connectionClosed, this));
     mBufferFlag = 0;
     mCMDParser.debug_on(0);
 
@@ -76,6 +79,42 @@ void SIM800L::handleUssd(SIM800L *_this)
     printf(CYAN("USSD response: %s\n"), buffer);
     _this->mBufferFlag = 1;
 }
+
+void SIM800L::handleIncomingByte(SIM800L *_this)
+{
+    int i = 0;
+    char buffer[1024];
+    int c = _this->mCMDParser.getc();
+
+    while(c != -1 && i < 1023)
+    {
+        buffer[i++] = c;
+        c = _this->mCMDParser.getc();
+    }
+    buffer[i] = 0;
+
+    int argc = 4;
+    char *argv[4];
+    util_parse_params(buffer, argv, &argc, ',');
+
+    int len = atoi(argv[1]);
+
+    util_parse_params(argv[argc-1], argv, &argc, ':');
+    char *data = argv[1];
+
+    for(int i=0; i < len; i++)
+    {
+        _this->handleRxByte(data[i]);
+    }
+//    printf("data[%d] in: ",len);
+//    diag_dump_buf(data, len);
+}
+
+void SIM800L::connectionClosed(SIM800L *_this)
+{
+    _this->mState = MODEM_DISCONNECT;
+}
+
 
 void SIM800L::sendUSSD(const char* ussd)
 {
@@ -151,11 +190,13 @@ int SIM800L::connect(int protocol, const char *host, int port)
         if(!strcmp(response, "OK"))
         {
             TRACE(GREEN("Connect OK\n"));
+            mCMDParser.set_timeout(1);
             mState = MODEM_CONNECTED;
             return 0;
         }
     }
     TRACE(RED("Connect FAIL\n"));
+    mState = MODEM_DISCONNECT;
     return -1;
 }
 
@@ -192,12 +233,12 @@ int SIM800L::isConnected()
 
 int SIM800L::send(unsigned char *data, int len)
 {
-    printf("sb4\n");
     if(mState != MODEM_CONNECTED)
         return -1;
 
-    printf("se\n");
     simMutex.lock();
+
+    mCMDParser.set_timeout(2000);
     mCMDParser.send("AT+CIPSEND=%d", len);
     if(mCMDParser.recv(">"))
     {
@@ -221,12 +262,14 @@ int SIM800L::send(unsigned char *data, int len)
             if(!strcmp(response, "OK"))
             {
                 simMutex.unlock();
+                mCMDParser.set_timeout(1);
                 return len;
             }
         }
     }
 
     mState = MODEM_DISCONNECT;
+    mCMDParser.set_timeout(1);
     simMutex.unlock();
     return -1;
 }
@@ -331,6 +374,7 @@ void SIM800L::run()
             resetDevice();
 
             retryReset();
+            wait(2);
             mState = MODEM_POLL;
         }
         break;
@@ -502,8 +546,31 @@ void SIM800L::run()
             wait(0.5);
 
             //Select Multiple Connection
+            mCMDParser.send("AT+CIPHEAD=1");
+            if(!mCMDParser.recv("OK\n"))
+            {
+                if(retryCommand() == -1)
+                    mState = MODEM_GPRS_ATTACHED;
+
+                break;
+            }
+
+            wait(0.5);
+
+            //Select Multiple Connection
             mCMDParser.send("AT+CIPMUX=0");
             if(!mCMDParser.recv("OK\n"))
+            {
+                if(retryCommand() == -1)
+                    mState = MODEM_GPRS_ATTACHED;
+
+                break;
+            }
+
+            wait(0.5);
+
+            mCMDParser.send("AT+CIPSHOWTP=1");
+            if(!mCMDParser.recv("OK"))
             {
                 if(retryCommand() == -1)
                     mState = MODEM_GPRS_ATTACHED;
@@ -536,16 +603,18 @@ void SIM800L::run()
 
             wait(0.5);
 
+            mCMDParser.set_timeout(2000);
             //Bring up wireless connection
             mCMDParser.send("AT+CIICR");
             if(!mCMDParser.recv("OK\n"))
             {
                 if(retryCommand() == -1)
                     mState = MODEM_GPRS_ATTACHED;
-
+                mCMDParser.set_timeout(500);
                 break;
             }
 
+            mCMDParser.set_timeout(500);
             retryReset();
             mState = MODEM_GET_IP;
         }
@@ -598,6 +667,7 @@ void SIM800L::run()
         case MODEM_DISCONNECT:
         {
             TRACE(RED("Modem Disconnect\n"));
+            mCMDParser.set_timeout(500);
             if(disconnectCallback)
                 disconnectCallback(1);
             mState = MODEM_CONNECT;
@@ -612,16 +682,16 @@ void SIM800L::run()
 
         case MODEM_CONNECTED:
         {
-
-            int a = -1;
-            do {
-                a = mCMDParser.getc();
-                if(a != -1)
-                {
-                    handleRxByte(a);
-                }
-            }
-            while(a != -1);
+            mCMDParser.process_oob();
+//            int a = -1;
+//            do {
+//                a = mCMDParser.getc();
+//                if(a != -1)
+//                {
+//                    handleRxByte(a);
+//                }
+//            }
+//            while(a != -1);
 
         }
         break;
@@ -634,28 +704,8 @@ void SIM800L::run()
     mElapsed = tick;
 }
 
-uint8_t connectCloseCount = 0;
-static uint8_t connectClose[11] = {0x0D, 0x0A, 0x43, 0x4C, 0x4F, 0x53, 0x45, 0x44,  0x0D, 0x0A, 0x00};
-
 void SIM800L::handleRxByte(uint8_t data)
 {
-    if(!connectCloseCount && (data == connectClose[0]))
-        connectCloseCount++;
-
-    if(connectCloseCount)
-    {
-        if(data != connectClose[connectCloseCount])
-            connectCloseCount = 0;
-
-        connectCloseCount++;
-        if(connectCloseCount == 10)
-        {
-            printf(RED("Connection kakked\n"));
-            mRxHead = mRxTail = 0;
-            mState = MODEM_DISCONNECT;
-        }
-    }
-
     //escape new lines
     if(data == 0x0A)
         return;
